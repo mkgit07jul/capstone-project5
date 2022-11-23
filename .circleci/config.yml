@@ -1,0 +1,231 @@
+version: 2.1
+orbs:
+  aws-eks: circleci/aws-eks@1.1.0
+  kubernetes: circleci/kubernetes@0.4.0
+executors:
+  python:
+    docker:
+      - image: circleci/python:3.7.3-stretch
+  aws:
+    docker:
+      - image: amazon/aws-cli
+
+jobs:
+  lint:
+    executor: python
+    steps:
+      - checkout
+      - run:
+          name: install dependencies
+          command: |
+            python3 -m venv venv
+            . venv/bin/activate
+            make install
+            sudo wget -O /bin/hadolint https://github.com/hadolint/hadolint/releases/download/v1.16.3/hadolint-Linux-x86_64 &&\
+            sudo chmod +x /bin/hadolint
+      - run:
+          name: run lint
+          command: |
+            . venv/bin/activate
+            make lint
+            
+  deploy-backend:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      # Checkout code from git
+      - checkout
+        
+      - run:
+          name: Ensure back-end infrastructure exists
+          command: |
+            pwd
+            ls -l
+            aws cloudformation deploy \
+              --template-file .circleci/files/backend.yml \
+              --tags project=capstone-Project5 \
+              --stack-name "backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --parameter-overrides ID="${CIRCLE_WORKFLOW_ID:0:7}"  
+              #exit 1
+      - run:
+          name: Add back-end ip to ansible inventory
+          command: |
+            backendip=$(aws ec2 describe-instances \
+              --query "Reservations[*].Instances[*].PublicIpAddress" \
+              --filters "Name=tag:project,Values=capstone-Project5" \
+              --output=text)
+            echo $backendip >> .circleci/ansible/machineip.txt
+            
+  deploy-frontend:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      # Checkout code from git
+      - checkout
+         
+      - run:
+          name: Ensure front-end infrastructure exists
+          command: |
+            aws cloudformation deploy \
+              --template-file .circleci/files/frontend.yml \
+              --tags project=capstone-Project5 \
+              --stack-name "frontend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --parameter-overrides ID="${CIRCLE_WORKFLOW_ID:0:7}"  
+              #exit 1
+ 
+  deploy-frontend-objects:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      # Checkout code from git
+      - checkout
+         
+      - run:
+          name: Ensure front-end infrastructure exists
+          command: |
+               aws s3 cp index.html s3://capstone-${CIRCLE_WORKFLOW_ID:0:7}
+
+  create-and-upload-docker-image:
+    machine: true
+        
+    steps:
+      # Checkout code from git
+      - checkout
+
+      - run:
+          name: Create docker image and upload
+          command: |
+            dockerpath=inaarya/path
+            echo $DOCKERHUB_PASSWORD | docker login --username $DOCKERHUB_USERNAME --password-stdin
+            pwd
+            docker build --tag=capstone .
+            docker tag capstone:latest $dockerpath:latest
+            docker push $dockerpath:latest
+  
+  
+  create-eks-cluster:
+     executor: aws-eks/python3
+     #parameters:
+      #cluster-name: 
+       #  description: |
+        #   capstone-cluster
+         
+         #type: string
+     steps:
+       - checkout
+       - aws-eks/install-aws-iam-authenticator:
+           release-tag: ''
+       - run:
+           name: Install the eksctl tool
+           command: |
+             if which eksctl > /dev/null; then
+             echo "eksctl is already installed"
+             exit 0
+             fi
+             mkdir -p eksctl_download
+             curl --silent --location --retry 5 "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C eksctl_download
+             chmod +x eksctl_download/eksctl
+             SUDO=""
+             if [ $(id -u) -ne 0 ] && which sudo > /dev/null ; then
+             SUDO="sudo"
+             fi
+             $SUDO mv eksctl_download/eksctl /usr/local/bin/
+             rmdir eksctl_download
+       - aws-eks/create-cluster:
+           cluster-name: capstonecluster
+           skip-kubectl-install: false
+           verbose: 3
+           node-type: t2.micro
+           nodes-max: 2
+           ssh-access: false
+           ssh-public-key: ''
+
+  deploy-cluster:
+    executor: aws-eks/python3
+    
+    steps:
+      - checkout
+      - aws-eks/update-kubeconfig-with-authenticator:
+          cluster-name: capstonecluster
+          install-kubectl: true
+      - kubernetes/create-or-update-resource:
+          get-rollout-status: false
+          resource-file-path: deployment.yml
+          resource-name: deployment/capstonecluster
+
+  cloudfront-update:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      # Checkout code from git
+      - checkout
+
+      - run:
+          name: Update cloudfront distribution
+          command: |
+            aws cloudformation deploy \
+              --template-file .circleci/files/cloudfront.yml \
+              --stack-name capstone-Project5-Cloudfront \
+              --parameter-overrides WorkflowID="${CIRCLE_WORKFLOW_ID:0:7}" \
+              --tags project=capstone
+
+  test-cluster:
+      executor: aws-eks/python3
+      
+      steps:
+        - kubernetes/install
+        - aws-eks/update-kubeconfig-with-authenticator:
+            cluster-name: capstonecluster
+        - run:
+            command: |
+              kubectl get services
+            name: Test cluster
+
+  delete-cluster:
+    executor: aws-eks/python3
+    
+    steps:
+      - checkout
+      - aws-eks/install-aws-iam-authenticator:
+          release-tag: ''
+      - run:
+          name: Install the eksctl tool
+          command: |
+            if which eksctl > /dev/null; then
+            echo "eksctl is already installed"
+            exit 0
+            fi
+            mkdir -p eksctl_download
+            curl --silent --location --retry 5 "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C eksctl_download
+            chmod +x eksctl_download/eksctl
+            SUDO=""
+            if [ $(id -u) -ne 0 ] && which sudo > /dev/null ; then
+            SUDO="sudo"
+            fi
+            $SUDO mv eksctl_download/eksctl /usr/local/bin/
+            rmdir eksctl_download
+      - aws-eks/delete-cluster:
+         cluster-name: capstonecluster
+
+workflows:
+  default:
+    jobs:
+      - deploy-backend
+      - deploy-frontend
+      - deploy-frontend-objects:
+          requires: [deploy-frontend]
+      - cloudfront-update:
+          requires: [deploy-frontend-objects]
+      - lint 
+      - create-and-upload-docker-image: 
+          requires: [lint]
+      - create-eks-cluster:
+          requires: [create-and-upload-docker-image]
+      - deploy-cluster:
+          requires: [create-eks-cluster]
+      - test-cluster:
+          requires: [deploy-cluster]
+      - delete-cluster:
+          requires: [test-cluster]
+      
+       
