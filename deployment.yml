@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: simple-html-container
-        image: inaarya/path/latest
+        image: forumanoj/capstone/latest
         imagePullPolicy: "Always"
         ports:
         - containerPort: 80
