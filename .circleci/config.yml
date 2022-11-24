@@ -95,7 +95,7 @@ jobs:
       - run:
           name: Create docker image and upload
           command: |
-            dockerpath=inaarya/path
+            dockerpath=forumanoj/capstone
             echo $DOCKERHUB_PASSWORD | docker login --username $DOCKERHUB_USERNAME --password-stdin
             pwd
             docker build --tag=capstone .
